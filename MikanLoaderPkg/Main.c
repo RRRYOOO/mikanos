@@ -255,9 +255,9 @@ EFI_STATUS EFIAPI UefiMain(
 
     /* カーネルファイルを実行する */
   UINT64 entry_addr = *(UINT64*)(kernel_base_addr + 24);  //エントリポイントアドレスを取得する。（最初に実行すべき関数が格納されているアドレス）
-  typedef void EntryPointType(void);  // エントリポイントを実行する関数の関数ポインタを定義
+  typedef void EntryPointType(UINT64, UINT64);  // エントリポイントを実行する関数の関数ポインタを定義
   EntryPointType* entry_point = (EntryPointType*)entry_addr; // エントリポイントのアドレスをエントリポイントを実行する関数の関数ポインタにキャストする。
-  entry_point();  //　エントリポイントを実行
+  entry_point(gop->Mode->FrameBufferBase, gop->Mode->FrameBufferSize);  //　エントリポイントを実行
 
   Print(L"All done\n");
 
