@@ -61,6 +61,7 @@ const CHAR16* GetMemoryTypeUnicode(EFI_MEMORY_TYPE type) {
 
 /* メモリ領域に書き込んだメモリマップをファイルに保存する用の関数 */
 EFI_STATUS SaveMemoryMap(struct MemoryMap* map, EFI_FILE_PROTOCOL* file) {
+  EFI_STATUS status; // 実行結果を返す用の変数
   CHAR8 buf[256];   // 1行分のメモリマップ情報を書き込みする用のバッファ
   UINTN len;        // 1行分の書き込みデータのサイズ格納用の変数
 
@@ -68,7 +69,11 @@ EFI_STATUS SaveMemoryMap(struct MemoryMap* map, EFI_FILE_PROTOCOL* file) {
   CHAR8* header =
     "Index, Type, Type(name), PhysicalStart, NumberOfPages, Attribute\n"; // ヘッダーの文字列作成
   len = AsciiStrLen(header);  // ヘッダーの文字列のサイズを取得
-  file->Write(file, &len, header);  // ファイルにヘッダー情報を書き込む
+  status = file->Write(file, &len, header);  // ファイルにヘッダー情報を書き込む
+  /* ヘッダー情報のファイルへの書き込みに失敗した場合 */
+  if (EFI_ERROR(status)) {
+    return status;
+  }
 
   Print(L"map->buffer = %08lx, map->map_size = %08lx\n",
       map->buffer, map->map_size);
@@ -88,7 +93,11 @@ EFI_STATUS SaveMemoryMap(struct MemoryMap* map, EFI_FILE_PROTOCOL* file) {
         desc->PhysicalStart, desc->NumberOfPages,
         desc->Attribute & 0xffffflu);
     /* bufの内容をファイルに書き込む */
-    file->Write(file, &len, buf);
+    status = file->Write(file, &len, buf);
+    /* bufの内容のファイルへの書き込みに失敗した場合 */
+    if (EFI_ERROR(status)) {
+      return status;
+    }
   }
 
   return EFI_SUCCESS;
@@ -96,52 +105,65 @@ EFI_STATUS SaveMemoryMap(struct MemoryMap* map, EFI_FILE_PROTOCOL* file) {
 
 /* ルート(ボリューム)をオープンする関数 */
 EFI_STATUS OpenRootDir(EFI_HANDLE image_handle, EFI_FILE_PROTOCOL** root) {
+  EFI_STATUS status; // 実行結果を返す用の変数
   EFI_LOADED_IMAGE_PROTOCOL* loaded_image;
   EFI_SIMPLE_FILE_SYSTEM_PROTOCOL* fs;
 
   /* OpenProtocolでEFI_LOADED_IMAGE_PROTOCOLをOpen */
-  gBS->OpenProtocol(
+  status = gBS->OpenProtocol(
       image_handle,
       &gEfiLoadedImageProtocolGuid,
       (VOID**)&loaded_image,
       image_handle,
       NULL,
       EFI_OPEN_PROTOCOL_BY_HANDLE_PROTOCOL);
+  if (EFI_ERROR(status)) {
+    return status;
+  }
 
   /* OpenProtocolでEFI_LOADED_IMAGE_PROTOCOLのDeviceHandleをOpen */
-  gBS->OpenProtocol(
+  status = gBS->OpenProtocol(
       loaded_image->DeviceHandle,
       &gEfiSimpleFileSystemProtocolGuid,
       (VOID**)&fs,
       image_handle,
       NULL,
       EFI_OPEN_PROTOCOL_BY_HANDLE_PROTOCOL);
+  if (EFI_ERROR(status)) {
+    return status;
+  }
 
   /* OpenVolumeでルート(ボリューム)をOpen */
-  fs->OpenVolume(fs, root);
-
-  return EFI_SUCCESS;
+  return fs->OpenVolume(fs, root);
 }
 
 /* GOPをオープンする関数 */
 EFI_STATUS OpenGOP(EFI_HANDLE image_handle,
                    EFI_GRAPHICS_OUTPUT_PROTOCOL** gop) {
+  EFI_STATUS status; // 実行結果を返す用の変数
   UINTN num_gop_handles = 0;
   EFI_HANDLE* gop_handles = NULL;
-  gBS->LocateHandleBuffer(
+
+  status = gBS->LocateHandleBuffer(
       ByProtocol,
       &gEfiGraphicsOutputProtocolGuid,
       NULL,
       &num_gop_handles,
       &gop_handles);
+  if (EFI_ERROR(status)) {
+    return status;
+  }
 
-  gBS->OpenProtocol(
+  status = gBS->OpenProtocol(
       gop_handles[0],
       &gEfiGraphicsOutputProtocolGuid,
       (VOID**)gop,
       image_handle,
       NULL,
       EFI_OPEN_PROTOCOL_BY_HANDLE_PROTOCOL);
+  if (EFI_ERROR(status)) {
+    return status;
+  }
 
   FreePool(gop_handles);
 
@@ -166,31 +188,70 @@ const CHAR16* GetPixelFormatUnicode(EFI_GRAPHICS_PIXEL_FORMAT fmt) {
 }
 
 
+/* エラー発生時の停止用の関数 */
+void Halt(void) {
+  while(1)  __asm("hlt");
+}
+
 EFI_STATUS EFIAPI UefiMain(
     EFI_HANDLE image_handle,
     EFI_SYSTEM_TABLE* system_table) {
+  EFI_STATUS status;
   Print(L"Hello, Mikan World!\n");
 
+  /* メモリマップを取得 */
   CHAR8 memmap_buf[4096 * 4];   //メモリマップ書き込み用のメモリ領域を確保する(16KiB)
   struct MemoryMap memmap = {sizeof(memmap_buf), memmap_buf, 0, 0, 0, 0};  // メモリマップ構造体を作成
-  GetMemoryMap(&memmap);  // メモリマップをメモリ領域に書き込む
+  status = GetMemoryMap(&memmap);  // メモリマップをメモリ領域に書き込む
+  /* メモリマップのメモリ領域への書き込みに失敗した場合 */
+  if (EFI_ERROR(status)) {
+    Print(L"failed to get memory map: %r\n", status);
+    Halt();
+  }
 
   /* ルート(ボリューム)をオープンする */
   EFI_FILE_PROTOCOL* root_dir;
-  OpenRootDir(image_handle, &root_dir);
+  status = OpenRootDir(image_handle, &root_dir);
+  /* ルートのオープンに失敗した場合 */
+  if (EFI_ERROR(status)) {
+    Print(L"failed to open root directory: %r\n", status);
+    Halt();
+  }
 
-  /* メモリマップを書き込む用のファイル"memmap"を作成し、memmapfileにオープン */
+  /* メモリマップを書き込む用のファイル"memmap"を作成し、memmap_fileにオープン */
   EFI_FILE_PROTOCOL* memmap_file;
-  root_dir->Open(
+  status = root_dir->Open(
       root_dir, &memmap_file, L"\\memmap",
       EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE | EFI_FILE_MODE_CREATE, 0);
-
-  SaveMemoryMap(&memmap, memmap_file);  // メモリ領域に書き込まれたメモリマップをファイルに書き込む
-  memmap_file->Close(memmap_file);  // memmap_fileを閉じる。
+  /* "memmap"のオープンに失敗した場合 */
+  if (EFI_ERROR(status)) {
+    Print(L"failed to open '\\memmap': %r\n", status);
+    Print(L"Ignored");
+  } else {
+    status = SaveMemoryMap(&memmap, memmap_file);  // メモリ領域に書き込まれたメモリマップをファイルに書き込む
+    /* メモリマップのファイルへの書き込みに失敗した場合 */
+    if (EFI_ERROR(status)) {
+      Print(L"failed to save memory map: %r\n", status);
+      Halt();
+    }
+    status = memmap_file->Close(memmap_file);  // memmap_fileを閉じる
+    /* memmap_fileを閉じるのに失敗した場合 */
+    if (EFI_ERROR(status)) {
+      Print(L"failed to close memory map: %r\n", status);
+      Halt();
+    }
+  }
 
   /* GOPを取得して画面描画する */
   EFI_GRAPHICS_OUTPUT_PROTOCOL* gop;
-  OpenGOP(image_handle ,&gop);  // GOPを取得する。
+  /* GOPを取得する */
+  status = OpenGOP(image_handle ,&gop);
+  /* GOPの取得に失敗した場合 */
+  if (EFI_ERROR(status)) {
+    Print(L"failed to open GOP: %r\n", status);
+    Halt();
+  }
+
   Print(L"Resolution: %ux%u, Pixel Format: %s, %u pixels/line\n",
       gop->Mode->Info->HorizontalResolution,
       gop->Mode->Info->VerticalResolution,
@@ -208,16 +269,26 @@ EFI_STATUS EFIAPI UefiMain(
 
   /* カーネルファイルをオープン */
   EFI_FILE_PROTOCOL* kernel_file;
-  root_dir->Open(
+  status = root_dir->Open(
       root_dir, &kernel_file, L"\\kernel.elf",
       EFI_FILE_MODE_READ, 0);
+  /* カーネルファイルのオープンに失敗した場合 */
+  if (EFI_ERROR(status)) {
+    Print(L"failed to open file '\\kernel.elf': %r\n", status);
+    Halt();
+  }
 
   /* カーネルファイルのファイル情報を読み出す */
   UINTN file_info_size = sizeof(EFI_FILE_INFO) + sizeof(CHAR16) * 12;
   UINT8 file_info_buffer[file_info_size];
-  kernel_file->GetInfo(
+  status = kernel_file->GetInfo(
       kernel_file, &gEfiFileInfoGuid,
       &file_info_size, file_info_buffer);
+  /* カーネルファイルのファイル情報の読み出しに失敗した場合 */
+  if(EFI_ERROR(status)) {
+    Print(L"failed to get file information: %r\n", status);
+    Halt();
+  }
 
   /* カーネルファイル情報からカーネルファイルのサイズを取得 */
   EFI_FILE_INFO* file_info = (EFI_FILE_INFO*)file_info_buffer;
@@ -225,16 +296,25 @@ EFI_STATUS EFIAPI UefiMain(
 
   /* カーネルファイルを格納できるメモリを確保する */
   EFI_PHYSICAL_ADDRESS kernel_base_addr = 0x100000; // カーネルファイルを0x10000000番地に格納する
-  gBS->AllocatePages(
+  status = gBS->AllocatePages(
       AllocateAddress, EfiLoaderData,
       (kernel_file_size + 0xfff) / 0x1000, &kernel_base_addr);
+  /* カーネルファイル格納用のメモリ確保に失敗した場合 */
+  if(EFI_ERROR(status)) {
+    Print(L"failed to allocate pages: %r\n", status);
+    Halt();
+  }
 
   /* カーネルファイルをメモリに読み込む */
-  kernel_file->Read(kernel_file, &kernel_file_size, (VOID*)kernel_base_addr);
+  status = kernel_file->Read(kernel_file, &kernel_file_size, (VOID*)kernel_base_addr);
+  /* カーネルファイルのメモリへの読み込みに失敗した場合 */
+  if(EFI_ERROR(status)) {
+    Print(L"error: %r\n", status);
+    Halt();
+  }
   Print(L"Kernel: 0x%0lx (%lu bytes)\n", kernel_base_addr, kernel_file_size);
 
   /* ブートサービスを停止させる */
-  EFI_STATUS status;
   status = gBS->ExitBootServices(image_handle, memmap.map_key); // ブートサービスの停止指示
   /* ブートサービスの停止に失敗した場合 */
   if (EFI_ERROR(status)) {
@@ -242,14 +322,14 @@ EFI_STATUS EFIAPI UefiMain(
     /* メモリマップ情報の再取得に失敗した場合 */
     if (EFI_ERROR(status)) {
       Print(L"failed to get memory map: %r\n", status);
-      while (1);
+      Halt();
     }
     /* ブートサービスを再度停止 */
     status = gBS->ExitBootServices(image_handle, memmap.map_key); // ブートサービスの停止指示
     /* ブートサービスの停止に再度失敗した場合 */
     if (EFI_ERROR(status)) {
       Print(L"Could not exit boot service: %r\n", status);
-      while (1);
+      Halt();
     }
   }
 
