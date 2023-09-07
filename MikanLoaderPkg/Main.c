@@ -8,6 +8,7 @@
 #include  <Protocol/DiskIo2.h>
 #include  <Protocol/BlockIo.h>
 #include  <Guid/FileInfo.h>
+#include  "frame_buffer_config.hpp"
 
 /* メモリマップ構造体を定義 */
 struct MemoryMap {
@@ -335,9 +336,33 @@ EFI_STATUS EFIAPI UefiMain(
 
     /* カーネルファイルを実行する */
   UINT64 entry_addr = *(UINT64*)(kernel_base_addr + 24);  //エントリポイントアドレスを取得する。（最初に実行すべき関数が格納されているアドレス）
-  typedef void EntryPointType(UINT64, UINT64);  // エントリポイントを実行する関数の関数ポインタを定義
+  /* 引数でGOPを渡す用の構造体を定義する */
+  struct FrameBufferConfig config = {
+    (UINT8*)gop->Mode->FrameBufferBase,
+    gop->Mode->Info->PixelsPerScanLine,
+    gop->Mode->Info->HorizontalResolution,
+    gop->Mode->Info->VerticalResolution,
+    0
+  };
+  /* ピクセルのデータ形式を引数用の構造体にセットする */
+  switch (gop->Mode->Info->PixelFormat) {
+    /* ピクセルのデータ形式がRGBの場合 */
+    case PixelRedGreenBlueReserved8BitPerColor:
+      config.pixel_format = kPixelRGBResv8VitPerColor;
+      break;
+    /* ピクセルのデータ形式がBGRの場合 */
+    case PixelBlueGreenRedReserved8BitPerColor:
+      config.pixel_format = kPixelBGRResv8VitPerColor;
+      break;
+    /* それ以外の場合 */
+    default:
+      Print(L"Unimplemented pixel format: %d\n", gop->Mode->Info->PixelFormat);
+      Halt();
+  }
+
+  typedef void EntryPointType(const struct FrameBufferConfig*);  // エントリポイントを実行する関数の関数ポインタを定義
   EntryPointType* entry_point = (EntryPointType*)entry_addr; // エントリポイントのアドレスをエントリポイントを実行する関数の関数ポインタにキャストする。
-  entry_point(gop->Mode->FrameBufferBase, gop->Mode->FrameBufferSize);  //　エントリポイントを実行
+  entry_point(&config);  //　エントリポイントを実行
 
   Print(L"All done\n");
 
