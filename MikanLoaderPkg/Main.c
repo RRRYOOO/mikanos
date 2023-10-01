@@ -3,12 +3,14 @@
 #include  <Library/UefiBootServicesTableLib.h>
 #include  <Library/PrintLib.h>
 #include  <Library/MemoryAllocationLib.h>
+#include  <Library/BaseMemoryLib.h>
 #include  <Protocol/LoadedImage.h>
 #include  <Protocol/SimpleFileSystem.h>
 #include  <Protocol/DiskIo2.h>
 #include  <Protocol/BlockIo.h>
 #include  <Guid/FileInfo.h>
 #include  "frame_buffer_config.hpp"
+#include  "elf.hpp"
 
 /* メモリマップ構造体を定義 */
 struct MemoryMap {
@@ -194,6 +196,42 @@ void Halt(void) {
   while(1)  __asm("hlt");
 }
 
+/* カーネルファイルのLOAD領域格納用メモリのサイズを計算する関数CalcLoadAddressRange() */
+void CalcLoadAddressRange(Elf64_Ehdr* ehdr, UINT64* first, UINT64* last) {
+  /* カーネルファイルのプログラムヘッダ領域を64ビットELFのプログラムヘッダ構造体型にキャストする */
+  Elf64_Phdr* phdr = (Elf64_Phdr*)((UINT64)ehdr + ehdr->e_phoff);
+  *first = MAX_UINT64;  // カーネルファイルのLOAD領域格納用メモリの開始アドレスを設定する
+  *last = 0;  // カーネルファイルのLOAD領域格納用メモリの終了アドレスを設定する
+  /* カーネルファイル内のすべてのLOADセグメントをfor文で順番に確認していき、開始アドレス(first)と終了アドレス(last)を更新していく */
+  for(Elf64_Half i = 0; i < ehdr->e_phnum; ++i) {
+    /* プログラムヘッダの配列のタイプがLOADセグメントでない場合はスキップ*/
+    if (phdr[i].p_type != PT_LOAD) continue;
+    *first = MIN(*first, phdr[i].p_vaddr);
+    *last = MAX(*last, phdr[i].p_vaddr + phdr[i].p_memsz);
+  }
+}
+
+/* 一時領域に展開したカーネルファイルのLOADセグメントをメモリに格納する関数CopyLoadSegments() */
+void CopyLoadSegments(Elf64_Ehdr* ehdr) {
+  /* カーネルファイルのプログラムヘッダ領域を64ビットELFのプログラムヘッダ構造体型にキャストする */
+  Elf64_Phdr* phdr = (Elf64_Phdr*)((UINT64)ehdr + ehdr->e_phoff);
+  /* カーネルファイル内のすべてのLOADセグメントをfor文で順番に確認していき、メモリにロードしていく */
+  for(Elf64_Half i = 0; i < ehdr->e_phnum; ++i) {
+    /* プログラムヘッダの配列のタイプがLOADセグメントでない場合はスキップ*/
+    if (phdr[i].p_type != PT_LOAD) continue;
+
+    /* 一時領域側のアドレスを計算して、segm_in_fileに設定 */
+    UINT64 segm_in_file = (UINT64)ehdr + phdr[i].p_offset;
+    /* LOADセグメントを一時領域からメモリにコピー */
+    CopyMem((VOID*)phdr[i].p_vaddr, (VOID*)segm_in_file, phdr[i].p_filesz);
+
+    /* ファイル上でのサイズとメモリ上でのサイズの差を計算して、 remain_bytesにセット */
+    UINTN remain_bytes = phdr[i].p_memsz - phdr[i].p_filesz;
+    /* セグメントのメモリ上のサイズがファイル上のサイズより大きい場合（remain_bytes > 0）、残りを0で埋める */
+    SetMem((VOID*)(phdr[i].p_vaddr + phdr[i].p_filesz), remain_bytes, 0);
+  }
+}
+
 EFI_STATUS EFIAPI UefiMain(
     EFI_HANDLE image_handle,
     EFI_SYSTEM_TABLE* system_table) {
@@ -210,10 +248,10 @@ EFI_STATUS EFIAPI UefiMain(
     Halt();
   }
 
-  /* ルート(ボリューム)をオープンする */
+  /* ルートディレクトリ(ボリューム)をオープンする */
   EFI_FILE_PROTOCOL* root_dir;
   status = OpenRootDir(image_handle, &root_dir);
-  /* ルートのオープンに失敗した場合 */
+  /* ルートディレクトリのオープンに失敗した場合 */
   if (EFI_ERROR(status)) {
     Print(L"failed to open root directory: %r\n", status);
     Halt();
@@ -226,8 +264,8 @@ EFI_STATUS EFIAPI UefiMain(
       EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE | EFI_FILE_MODE_CREATE, 0);
   /* "memmap"のオープンに失敗した場合 */
   if (EFI_ERROR(status)) {
-    Print(L"failed to open '\\memmap': %r\n", status);
-    Print(L"Ignored");
+    Print(L"failed to open file '\\memmap': %r\n", status);
+    Print(L"Ignored.\n");
   } else {
     status = SaveMemoryMap(&memmap, memmap_file);  // メモリ領域に書き込まれたメモリマップをファイルに書き込む
     /* メモリマップのファイルへの書き込みに失敗した場合 */
@@ -246,7 +284,7 @@ EFI_STATUS EFIAPI UefiMain(
   /* GOPを取得して画面描画する */
   EFI_GRAPHICS_OUTPUT_PROTOCOL* gop;
   /* GOPを取得する */
-  status = OpenGOP(image_handle ,&gop);
+  status = OpenGOP(image_handle, &gop);
   /* GOPの取得に失敗した場合 */
   if (EFI_ERROR(status)) {
     Print(L"failed to open GOP: %r\n", status);
@@ -265,7 +303,7 @@ EFI_STATUS EFIAPI UefiMain(
 
   UINT8* frame_buffer = (UINT8*)gop->Mode->FrameBufferBase; // フレームバッファの先頭アドレスをフレームバッファ型にキャスト
   for(UINTN i = 0; i < gop->Mode->FrameBufferSize; ++i) {
-    frame_buffer[i] = 255;
+    frame_buffer[i] = 255;  // フレームバッファを白で埋める（画面が白一色になる）
   }
 
   /* カーネルファイルをオープン */
@@ -295,25 +333,53 @@ EFI_STATUS EFIAPI UefiMain(
   EFI_FILE_INFO* file_info = (EFI_FILE_INFO*)file_info_buffer;
   UINTN kernel_file_size = file_info->FileSize;
 
-  /* カーネルファイルを格納できるメモリを確保する */
-  EFI_PHYSICAL_ADDRESS kernel_base_addr = 0x100000; // カーネルファイルを0x10000000番地に格納する
-  status = gBS->AllocatePages(
-      AllocateAddress, EfiLoaderData,
-      (kernel_file_size + 0xfff) / 0x1000, &kernel_base_addr);
+  /* カーネルファイルを一時領域に読み込む */
+  VOID* kernel_buffer;
+  /* カーネルファイルを一時的に読み込むための領域(=kernel_buffer)を確保する */
+  status = gBS->AllocatePool(EfiLoaderData, kernel_file_size, &kernel_buffer);
   /* カーネルファイル格納用のメモリ確保に失敗した場合 */
+  if(EFI_ERROR(status)) {
+    Print(L"failed to allocate pool: %r\n", status);
+    Halt();
+  }
+  /* カーネルファイルを一時領域(=kernel_buffer)に読み込む */
+  status = kernel_file->Read(kernel_file, &kernel_file_size, kernel_buffer);
+    /* カーネルファイルのメモリへの読み込みに失敗した場合 */
+  if(EFI_ERROR(status)) {
+    Print(L"error: %r\n", status);
+    Halt();
+  }
+
+  /* 一時領域に読み込んだカーネルファイルのプログラムヘッダを読み、最終目的地の番地の範囲を取得する */
+  /* 一時領域に読み込んだカーネルファイルを64ビットELFのファイルヘッダの構造体型にキャストする */
+  Elf64_Ehdr* kernel_ehdr = (Elf64_Ehdr*)kernel_buffer;
+  UINT64 kernel_first_addr, kernel_last_addr;
+  /* CalcLoadAddressRange()が最終目的地の番地の範囲を計算する */
+  /* 範囲の開始アドレスをkernel_first_addrに、終了アドレスをkernel_last_addrに設定する */
+  CalcLoadAddressRange(kernel_ehdr, &kernel_first_addr, &kernel_last_addr);
+
+  /* カーネルファイルのLOADセグメントを格納するのに必要なメモリメモリのサイズを計算する（ページ単位） */
+  UINTN num_pages = (kernel_last_addr - kernel_first_addr + 0xfff) / 0x1000;
+  /* カーネルファイルのLOADセグメントを格納するためのメモリ領域を確保する */
+  status = gBS->AllocatePages(AllocateAddress, EfiLoaderData,
+                              num_pages, &kernel_first_addr);
+  /* カーネルファイルのLOADセグメントを格納するためのメモリ領域確保に失敗した場合 */
   if(EFI_ERROR(status)) {
     Print(L"failed to allocate pages: %r\n", status);
     Halt();
   }
 
-  /* カーネルファイルをメモリに読み込む */
-  status = kernel_file->Read(kernel_file, &kernel_file_size, (VOID*)kernel_base_addr);
-  /* カーネルファイルのメモリへの読み込みに失敗した場合 */
-  if(EFI_ERROR(status)) {
-    Print(L"error: %r\n", status);
+  /* CopyLoadSegments()でLoadセグメントを一括でメモリに格納する */
+  CopyLoadSegments(kernel_ehdr);
+  Print(L"Kernel: 0x%0lx - 0x%0lx\n", kernel_first_addr, kernel_last_addr);
+
+  /* 一時領域を解放する */
+  status = gBS->FreePool(kernel_buffer);
+  /* 解放に失敗した場合 */
+  if (EFI_ERROR(status)) {
+    Print(L"failed to free pool: %r\n", status);
     Halt();
   }
-  Print(L"Kernel: 0x%0lx (%lu bytes)\n", kernel_base_addr, kernel_file_size);
 
   /* ブートサービスを停止させる */
   status = gBS->ExitBootServices(image_handle, memmap.map_key); // ブートサービスの停止指示
@@ -334,8 +400,8 @@ EFI_STATUS EFIAPI UefiMain(
     }
   }
 
-    /* カーネルファイルを実行する */
-  UINT64 entry_addr = *(UINT64*)(kernel_base_addr + 24);  //エントリポイントアドレスを取得する。（最初に実行すべき関数が格納されているアドレス）
+  /* カーネルファイルを実行する */
+  UINT64 entry_addr = *(UINT64*)(kernel_first_addr + 24);  //エントリポイントアドレスを取得する。（最初に実行すべき関数が格納されているアドレス）
   /* 引数でGOPを渡す用の構造体を定義する */
   struct FrameBufferConfig config = {
     (UINT8*)gop->Mode->FrameBufferBase,
@@ -348,11 +414,11 @@ EFI_STATUS EFIAPI UefiMain(
   switch (gop->Mode->Info->PixelFormat) {
     /* ピクセルのデータ形式がRGBの場合 */
     case PixelRedGreenBlueReserved8BitPerColor:
-      config.pixel_format = kPixelRGBResv8VitPerColor;
+      config.pixel_format = kPixelRGBResv8BitPerColor;
       break;
     /* ピクセルのデータ形式がBGRの場合 */
     case PixelBlueGreenRedReserved8BitPerColor:
-      config.pixel_format = kPixelBGRResv8VitPerColor;
+      config.pixel_format = kPixelBGRResv8BitPerColor;
       break;
     /* それ以外の場合 */
     default:
