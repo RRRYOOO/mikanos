@@ -3,6 +3,26 @@
 
 #include "frame_buffer_config.hpp"
 
+/* 'A'のフォントデータを定義 */
+const uint8_t kFontA[16] = {
+  0b00000000,   //
+  0b00011000,   //   **   
+  0b00011000,   //   **   
+  0b00011000,   //   **   
+  0b00011000,   //   **   
+  0b00100100,   //  *  *  
+  0b00100100,   //  *  *  
+  0b00100100,   //  *  *  
+  0b00100100,   //  *  *  
+  0b01111110,   // ****** 
+  0b01000010,   // *    * 
+  0b01000010,   // *    * 
+  0b01000010,   // *    * 
+  0b11100111,   //***  ***
+  0b00000000,   //
+  0b00000000,   //
+};
+
 /* 1ピクセルのRGBを制御する用の構造体を定義する */
 struct PixelColor {
     uint8_t r, g, b;
@@ -51,6 +71,20 @@ class BGRResv8BitPerColorPixelWriter : public PixelWriter {
   }
 };
 
+/* 'A'のフォント描画用の関数 */
+void WriteAscii(PixelWriter& writer, int x, int y, char c, const PixelColor& color) {
+  if (c != 'A') {
+    return;
+  }
+  for (int dy = 0; dy < 16; ++dy) {
+    for (int dx = 0; dx < 8; ++dx) {
+      if (kFontA[dy] << dx & 0x80u) {
+        writer.Write(x + dx, y + dy, color);
+      }
+    }
+  }
+}
+
 /* 配置new用の関数 */
 void* operator new(size_t size, void* buf) {
     return buf;     // 引数で受け取った領域のアドレスをそのままかえるだけ
@@ -83,9 +117,14 @@ extern "C" void KernelMain(const FrameBufferConfig& frame_buffer_config) {
     }
     /* 指定した位置を緑に塗る*/
     for (int x = 0; x < 200; ++x) {     // 横（0～199まで）
-        for (int y = 0; y < 100; ++y) {     // 横（0～99まで）
+        for (int y = 0; y < 100; ++y) {     // 縦（0～99まで）
             pixel_writer->Write(x, y, {0, 255, 0}); // 開始位置から横にx、縦にyの位置を緑に塗る
         }
     }
+
+    /* 指定した位置に'A'を描画 */
+    WriteAscii(*pixel_writer, 50, 50, 'A', {0, 0, 0});
+    WriteAscii(*pixel_writer, 58, 50, 'A', {0, 0, 0});
+
     while(1) __asm__("hlt");
 }
