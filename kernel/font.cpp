@@ -1,34 +1,28 @@
 #include "font.hpp"
 
-/* 'A'のフォントデータを定義 */
-const uint8_t kFontA[16] = {
-  0b00000000,   //
-  0b00011000,   //   **   
-  0b00011000,   //   **   
-  0b00011000,   //   **   
-  0b00011000,   //   **   
-  0b00100100,   //  *  *  
-  0b00100100,   //  *  *  
-  0b00100100,   //  *  *  
-  0b00100100,   //  *  *  
-  0b01111110,   // ****** 
-  0b01000010,   // *    * 
-  0b01000010,   // *    * 
-  0b01000010,   // *    * 
-  0b11100111,   //***  ***
-  0b00000000,   //
-  0b00000000,   //
-};
+extern const uint8_t _binary_hankaku_bin_start;   // フォントデータの開始アドレス
+extern const uint8_t _binary_hankaku_bin_end;     // フォントデータの終了アドレス+1
+extern const uint8_t _binary_hankaku_bin_size;    // フォントデータのサイズ
 
-/* 'A'のフォント描画用の関数 */
+/* 指定した文字のフォントデータの格納先アドレスを返す関数 */
+const uint8_t* GetFont(char c) {
+  auto index = 16 * static_cast<unsigned int>(c);   // 引数cの文字をASCIIコードに変換後に、×16してフォントデータの先頭アドレスを算出
+  if (index >= reinterpret_cast<uintptr_t>(&_binary_hankaku_bin_size)) {  // indexの値がフォントデータの全サイズより大きい場合（エラー）
+    return nullptr;
+  }
+  return &_binary_hankaku_bin_start + index;    // フォントデータの開始アドレスからindexだけ進んだアドレスを返す
+}
+
+/* フォント描画用の関数 */
 void WriteAscii(PixelWriter& writer, int x, int y, char c, const PixelColor& color) {
-  if (c != 'A') {
+  const uint8_t* font = GetFont(c);   // 指定した文字のフォントデータの格納先アドレスを取得
+  if (font == nullptr) {    // アドレス読み出し失敗
     return;
   }
   for (int dy = 0; dy < 16; ++dy) {
     for (int dx = 0; dx < 8; ++dx) {
-      if (kFontA[dy] << dx & 0x80u) {
-        writer.Write(x + dx, y + dy, color);
+      if (font[dy] << dx & 0x80u) {
+        writer.Write(x + dx, y + dy, color);    // 指定した位置のピクセルを指定したカラーで描画
       }
     }
   }

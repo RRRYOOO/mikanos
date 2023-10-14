@@ -42,9 +42,11 @@ extern "C" void KernelMain(const FrameBufferConfig& frame_buffer_config) {
         }
     }
 
-    /* 指定した位置に'A'を描画 */
-    WriteAscii(*pixel_writer, 50, 50, 'A', {0, 0, 0});
-    WriteAscii(*pixel_writer, 58, 50, 'A', {0, 0, 0});
+    /* ASCIIコードの0番('!')~255番('~')までの文字を出力 */
+    int i = 0;
+    for (char c = '!'; c <= '~'; ++c, ++i) {
+      WriteAscii(*pixel_writer, 8 * i, 50, c, {0, 0, 0});
+    }
 
     while(1) __asm__("hlt");
 }
